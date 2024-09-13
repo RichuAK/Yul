@@ -19,7 +19,10 @@ bytes32 constant insufficientAllowanceSelector = 0xf180d8f9000000000000000000000
 
 bytes32 constant transferEventHash = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef;
 
-bytes32 constant approveEventHash = 0x8c5be1e5ebec7d5bd14f71427d1e84f3ddbc0c6c0675175b23b6b09cb0a8cce8; // copilot generated
+bytes32 constant falseApprovalEventHash = 0x8c5be1e5ebec7d5bd14f71427d1e84f3ddbc0c6c0675175b23b6b09cb0a8cce8; // copilot generated
+
+bytes32 constant approvalEventHash = 0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925;
+uint256 constant MAX_UINT = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
 
 error InsufficientBalance();
 error InsufficientAllowance(address owner, address spender);
@@ -28,13 +31,33 @@ error InsufficientAllowance(address owner, address spender);
 /// @author Richu A Kuttikattu
 /// @notice For demo purposes ONLY.
 contract YulERC20 {
-    // uint256 public constant MAX_UINT = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
     // owner -> balance
     mapping(address => uint256) internal _balances;
     // owner -> spender -> allowance
     mapping(address => mapping(address => uint256)) internal _allowances;
 
+    uint256 internal _totalSupply;
+
     event Transfer(address indexed from, address indexed to, uint256 value);
+
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor() {
+        assembly {
+            // setting totalSupply to MAX_UINT
+            sstore(0x02, MAX_UINT)
+
+            // giving the deployer the full supply
+            mstore(0x00, caller())
+            mstore(0x20, 0x00)
+            let senderBalanceSlot := keccak256(0x00, 0x40)
+            sstore(senderBalanceSlot, MAX_UINT)
+
+            // logging the transfer event
+            mstore(0x00, MAX_UINT)
+            log3(0x00, 0x20, transferEventHash, 0x00, caller()) // from: 0x00, to: caller()
+        }
+    }
 
     function name() public pure returns (string memory) {
         // solidity needs three slots to store a string(or any dynamic array, I guess?):
@@ -66,6 +89,13 @@ contract YulERC20 {
         assembly {
             mstore(0x00, 0x12)
             return(0x00, 0x20) // the number 18 is stored right most at the 0th slot, hence gotta return the whole 32 bytes
+        }
+    }
+
+    function totalSupply() public view returns (uint256) {
+        assembly {
+            mstore(0x00, sload(0x02))
+            return(0x00, 0x20)
         }
     }
 
@@ -114,8 +144,8 @@ contract YulERC20 {
 
             if lt(senderBalance, amount) {
                 // stores the custom error selector to memory to revert
-                mstore(memptr, insufficientAllowanceSelector)
-                revert(memptr, 0x20)
+                mstore(memptr, insufficientBalanceSelector)
+                revert(memptr, 0x04)
             }
 
             // updates sender balance before doing anything else
@@ -138,6 +168,103 @@ contract YulERC20 {
 
             mstore(memptr, 0x01)
             return(memptr, 0x20) // returns true
+        }
+    }
+
+    function allowance(address owner, address spender) public view returns (uint256) {
+        // return _allowances[owner][spender];
+        // keccak256(spender, keccak256(owner, 0x01))
+
+        assembly {
+            mstore(0x00, owner)
+            mstore(0x20, 0x01)
+            let innerMappingSlot := keccak256(0x00, 0x40)
+
+            mstore(0x00, spender)
+            mstore(0x20, innerMappingSlot)
+            let allowanceSlot := keccak256(0x00, 0x40)
+
+            mstore(0x00, sload(allowanceSlot))
+            return(0x00, 0x20)
+        }
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        assembly {
+            mstore(0x00, caller())
+            mstore(0x20, 0x01)
+            let innerMappingSlot := keccak256(0x00, 0x40)
+
+            mstore(0x00, spender)
+            mstore(0x20, innerMappingSlot)
+            let allowanceSlot := keccak256(0x00, 0x40)
+            sstore(allowanceSlot, amount)
+
+            // log the approval event
+            mstore(0x00, amount)
+            log3(0x00, 0x20, approvalEventHash, caller(), spender)
+
+            mstore(0x00, 0x01)
+            return(0x00, 0x20)
+        }
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
+        assembly {
+            // loads the allowance
+            mstore(0x00, from)
+            mstore(0x20, 0x01)
+            let innerMappingSlot := keccak256(0x00, 0x40)
+
+            mstore(0x00, caller())
+            mstore(0x20, innerMappingSlot)
+            let allowanceSlot := keccak256(0x00, 0x40)
+            let callerAllowance := sload(allowanceSlot)
+
+            if lt(callerAllowance, amount) {
+                // we're only storing the selector, which is just 4 bytes. Hence the overwriting at 0x04 with from address
+                // and 0x24 with the caller (4+20)
+                // should be doing this with memptr instead of 0x00, but being cocky
+                // especially if there's code outside the assembly block
+                mstore(0x00, insufficientAllowanceSelector)
+                mstore(0x04, from)
+                mstore(0x24, caller())
+                revert(0x00, 0x44) // 4+20+20
+            }
+
+            // check if the from address has enough balance
+            mstore(0x00, from)
+            mstore(0x20, 0x00)
+            let fromBalanceSlot := keccak256(0x00, 0x40)
+            let fromBalance := sload(fromBalanceSlot)
+            if lt(fromBalance, amount) {
+                mstore(0x00, insufficientBalanceSelector)
+                revert(0x00, 0x04)
+            }
+
+            // update the from balance
+            let newFromBalance := sub(fromBalance, amount)
+            sstore(fromBalanceSlot, newFromBalance)
+
+            // update the allowance
+            // If callerAllowance == MAX_UINT, the assumption is that the spender is always allowed to spend on the owner's behalf
+            if lt(callerAllowance, MAX_UINT) { sstore(allowanceSlot, sub(callerAllowance, amount)) }
+
+            // update the to balance
+            mstore(0x00, to)
+            mstore(0x20, 0x00)
+            let toBalanceSlot := keccak256(0x00, 0x40)
+            let toBalance := sload(toBalanceSlot)
+            let newToBalance := add(toBalance, amount)
+            sstore(toBalanceSlot, newToBalance)
+
+            // log the transfer event
+            mstore(0x00, amount)
+            log3(0x00, 0x20, transferEventHash, from, to)
+
+            // return true
+            mstore(0x00, 0x01)
+            return(0x00, 0x20)
         }
     }
 }
