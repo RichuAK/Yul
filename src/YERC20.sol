@@ -30,7 +30,7 @@ error InsufficientAllowance(address owner, address spender);
 /// @title Yul ERC20
 /// @author Richu A Kuttikattu
 /// @notice For demo purposes ONLY.
-contract YulERC20 {
+contract YERC20 {
     // owner -> balance
     mapping(address => uint256) internal _balances;
     // owner -> spender -> allowance
